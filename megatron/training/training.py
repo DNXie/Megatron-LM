@@ -54,9 +54,6 @@ from megatron.core.distributed import (
     DistributedDataParallelConfig,
     TorchFullyShardedDataParallelConfig,
 )
-from megatron.core.distributed.custom_fsdp import (
-    FullyShardedDataParallel as custom_FSDP,
-)
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
     FullyShardedDataParallel as megatron_FSDP,
 )
@@ -99,8 +96,13 @@ from megatron.core.parallel_state import (
     destroy_model_parallel,
 )
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.rerun_state_machine import (
+    destroy_rerun_state_machine,
+    get_rerun_state_machine,
+    RerunDataIterator,
+    RerunMode,
+)
 
-# Import token throughput monitor
 from megatron.core.titan_metrics import (
     calculate_tokens_in_batch,
     initialize_throughput_monitor,
@@ -146,6 +148,7 @@ from .utils import (
     unwrap_model,
     update_use_dist_ckpt,
 )
+
 
 stimer = StragglerDetector()
 
@@ -1665,6 +1668,27 @@ def training_log(
                 "world-size vs samples", args.world_size, args.consumed_train_samples
             )
             if wandb_writer:
+                wandb_writer.log({"world-size": args.world_size}, iteration)
+        if grad_norm is not None:
+            writer.add_scalar("grad-norm", grad_norm, iteration)
+            writer.add_scalar(
+                "grad-norm vs samples", grad_norm, args.consumed_train_samples
+            )
+            if wandb_writer:
+                wandb_writer.log({"grad-norm": grad_norm}, iteration)
+        if num_zeros_in_grad is not None:
+            writer.add_scalar("num-zeros", num_zeros_in_grad, iteration)
+            writer.add_scalar(
+                "num-zeros vs samples", num_zeros_in_grad, args.consumed_train_samples
+            )
+            if wandb_writer:
+                wandb_writer.log({"num-zeros": num_zeros_in_grad}, iteration)
+        if params_norm is not None:
+            writer.add_scalar("params-norm", params_norm, iteration)
+            writer.add_scalar(
+                "params-norm vs samples", params_norm, args.consumed_train_samples
+            )
+            if wandb_writer:
                 wandb_writer.log({"params-norm": params_norm}, iteration)
         if getattr(args, "perform_rl_step", False):
             grpo_collection_iteration = iteration // (
@@ -2366,6 +2390,11 @@ def train(
         )
         cuda_graph_helper.create_cudagraphs()
 
+    # Initialize token throughput monitor
+    if iteration == start_iteration:
+        initialize_throughput_monitor(log_freq=1)
+        print_rank_0("Token throughput monitor initialized")
+
     # Run training iterations till done.
     buffered_rollouts = None
     ref_state_dict = None
@@ -2550,6 +2579,7 @@ def train(
                 decoupled_learning_rate = param_group["lr"]
             else:
                 learning_rate = param_group["lr"]
+
         # Log token throughput metrics
         if not skipped_iter:
             # Extract loss value for logging (use first loss if multiple losses)
